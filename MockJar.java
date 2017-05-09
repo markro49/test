@@ -1,21 +1,21 @@
 //package daikon;
 
-import daikon.util.*;
+import plume.*;
 import java.io.*;
 import java.util.*;
 import java.util.jar.JarEntry;
 import java.util.jar.JarInputStream;
-import org.apache.bcel.classfile.ClassParser;
-import org.apache.bcel.classfile.JavaClass;
+import java.util.jar.JarOutputStream;
+import org.apache.bcel.*;
+import org.apache.bcel.classfile.*;
+import org.apache.bcel.generic.*;
 
 /*>>>
 import org.checkerframework.checker.nullness.qual.*;
 */
 
 /**
- * This is the main class for MockJar. 
- * This class parses the command line arguments.
- * with the javaagent switch on the target program. Code based largely on daikon.Chicory.
+ * This is the main class for MockJar.
  */
 public class MockJar {
 
@@ -42,6 +42,8 @@ public class MockJar {
   private static final SimpleLog basic = new SimpleLog(false);
 
   private static Map<String, String> packageMap = new HashMap<String, String>();
+
+  private static ConstantPoolGen pgen;
 
   /**
    * Entry point of MockJar
@@ -129,6 +131,9 @@ public class MockJar {
     System.exit(1);
   }
 
+/**
+ * Read the replacements file and build packageMap of old to new package names.
+ */
   private static void read_replacements(final File file) throws Exception {
     basic.log("opening " + file);
     FileReader fr = new FileReader(file);
@@ -160,11 +165,11 @@ public class MockJar {
       num_processed++;
     }
     reader.close();
-    
+
     if (num_read == 0) {
       fatal_error("replacements file empty or ill formed");
     }
-    
+
     if (num_processed == 0) {
       fatal_error("no valid records found in replacements file");
     }
@@ -173,18 +178,29 @@ public class MockJar {
     basic.log("num_processed: " + num_processed);
   }
 
+/**
+ * Read the source jar file and look for ".class" files whose package matches one of
+ * the entries in packageMap.
+ */
   private static void process_jar(final File file) throws Exception {
     basic.log("opening " + file);
     FileInputStream fis = new FileInputStream(file);
     JarInputStream jis = new JarInputStream(fis);
-    JarEntry je = null;
+    JarEntry jie = null;
     int num_read = 0;
     int num_processed = 0;
 
+    if (output_file_name == null) {
+      output_file_name = "mock." + file.getName();
+    }
+    FileOutputStream fos = new FileOutputStream(output_file_name);
+    // do we need manifest?  don't think Java Beans will work without it.
+    JarOutputStream jos = new JarOutputStream(fos);
+
     basic.log("processing " + file);
 
-    while ((je = jis.getNextJarEntry()) != null) {
-      String name = je.getName();
+    while ((jie = jis.getNextJarEntry()) != null) {
+      String name = jie.getName();
       num_read++;
 
       if (name.endsWith(".class")) {
@@ -192,10 +208,26 @@ public class MockJar {
         try {
           final ClassParser parser = new ClassParser(jis, name);
           final JavaClass jc = parser.parse();
-          String newPackageName = packageMap.get(jc.getPackageName());
+          // ISSUE
+          // we may need to iterate over map and see if any key entry
+          // matches via startsWith method.
+          String oldPackageName = jc.getPackageName();
+          String newPackageName = packageMap.get(oldPackageName);
           if (newPackageName != null) {
-            // DO IT!
-            System.out.println(jc.getClassName());
+            ClassGen cg = new ClassGen(jc);
+            process_methods(cg);
+
+            // ISSUE
+            // do we need to modify SuperclassName?
+            String newClassName = cg.getClassName().replaceFirst(oldPackageName, newPackageName);
+            cg.setClassName(newClassName);
+            basic.log("old Class: " + jc.getClassName() + " Superclass: " + jc.getSuperclassName());
+
+            // write the modified class to the output jar file
+            JarEntry joe = new JarEntry(newClassName.replace(".", "/") + ".class");
+            jos.putNextEntry(joe);
+            byte[] buffer = cg.getJavaClass().getBytes();
+            jos.write(buffer, 0, buffer.length);
             num_processed++;
           }
         } catch (Exception e) {
@@ -206,6 +238,7 @@ public class MockJar {
       }
     }
     jis.close();
+    jos.close();
 
     if (num_read == 0) {
       fatal_error("source jar file empty or ill formed");
@@ -217,6 +250,91 @@ public class MockJar {
 
     basic.log("num_read: " + num_read);
     basic.log("num_processed: " + num_processed);
+  }
+
+/**
+ * Modify the class methods to have no body - except return.
+ */
+  private static void process_methods(ClassGen cg) {
+    int num_read = 0;
+    int num_processed = 0;
+    String class_name = cg.getClassName();
+    StackMap smta;
+
+    basic.log("processing " + class_name);
+
+    pgen = cg.getConstantPool();
+
+    try {
+      Method[] methods = cg.getMethods();
+      for (int i = 0; i < methods.length; i++) {
+        MethodGen mg = new MethodGen(methods[i], class_name, pgen);
+
+        basic.log("processing " + mg.getName());
+        num_read++;
+
+        // Get the instruction list and skip methods with no instructions
+        InstructionList il = mg.getInstructionList();
+        if (il == null) {
+           continue;
+        }
+
+        // Remove existing StackMapTable (if present)
+        smta = (StackMap) get_stack_map_table_attribute(mg);
+        if (smta != null) {
+           mg.removeCodeAttribute(smta);
+        }
+
+        InstructionList new_il = new InstructionList();
+        Type result_type = mg.getType();
+        if (result_type.getType() != Const.T_VOID) {
+          new_il.append(InstructionFactory.createNull(result_type));
+        }
+        new_il.append(InstructionFactory.createReturn(result_type));
+
+        // Update the instruction list
+        mg.setInstructionList(new_il);
+        mg.update();
+
+        // Update the max stack
+        mg.setMaxStack();
+        mg.update();
+
+        // Update the method in the class
+        cg.replaceMethod(methods[i], mg.getMethod());
+        num_processed++;
+      }
+
+      cg.update();
+    } catch (Exception e) {
+      System.out.printf("Unexpected exception encountered: %s%n", e);
+      e.printStackTrace();
+      //System.out.println(Arrays.toString(e.getStackTrace()));
+    }
+
+    basic.log("num_read: " + num_read);
+    basic.log("num_processed: " + num_processed);
+  }
+
+  private static Attribute get_stack_map_table_attribute(MethodGen mg) {
+    for (Attribute a : mg.getCodeAttributes()) {
+      if (is_stack_map_table(a)) {
+        return a;
+      }
+    }
+    return null;
+  }
+
+  private static boolean is_stack_map_table(Attribute a) {
+    return (get_attribute_name(a).equals("StackMapTable"));
+  }
+
+  /** Returns the attribute name for the specified attribute. */
+  private static String get_attribute_name(Attribute a) {
+    int con_index = a.getNameIndex();
+    Constant c = pgen.getConstant(con_index);
+    String att_name = ((ConstantUtf8) c).getBytes();
+    return att_name;
   }
 
 }
