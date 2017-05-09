@@ -1,0 +1,25 @@
+MockJar needs bcel.jar and plume.jar on the classpath to compile and run.
+Probably the easiest way is to use daikon.jar which has both. My path was:
+CLASSPATH=/homes/gws/markro/invariants/daikon/daikon.jar:/homes/gws/markro/jdk8/jre/lib/rt.jar:/homes/gws/markro/jdk8/lib/tools.jar
+
+To run:
+java -cp .:$CLASSPATH MockJar <input jar file> --replacements-file=<package replacement text file>
+
+"-h" (or "--help") will print usage info:
+Usage: java MockJar [options] source-jar-file
+-d --debug=<boolean>              - Dump the instrumented classes to disk [default false]
+-f --output-file-name=<string>    - Output filename for modified jar file
+-h --help=<boolean>               - Output usage message [default false]
+-r --replacements-file=<filename> - File containing a list of packages to be modified and renamed
+-v --verbose=<boolean>            - Print information about the classes being transformed [default false]
+--input-file=<filename>           - Source jar file to be processed
+
+"-v" doesn't currently do anything.
+"-d" prints tons of stuff to stdout, probably more useful to me than you
+
+Known issues:
+-need separate lines in replacements-file for all sub-directories (not too hard to change)
+-output jar has default manifest which means Java Beans won't work (don't plan to fix)
+
+
+Not really crazy about the toolname 'MockJar' - gladly accept alternative ideas.
